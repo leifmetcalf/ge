@@ -1,7 +1,10 @@
 #![feature(stdarch_x86_avx512)]
 #![feature(portable_simd)]
+#![feature(iterator_try_collect)]
 // use std::arch::x86_64::_mm256_permutexvar_epi8;
 use std::fmt;
+use std::iter;
+use std::ops;
 use std::simd::u8x32;
 
 #[derive(Clone, Copy, Debug)]
@@ -31,23 +34,46 @@ impl Permutation {
         cycles
     }
 
-    fn from_cycles(cycles: &[&[u8]]) -> Permutation {
+    fn from_array(arr: &[u8]) -> Permutation {
+        Permutation(u8x32::load_or(arr, u8x32::from_array(OMEGA)).into())
+    }
+
+    fn from_cycles<T, R>(cycles: T) -> Permutation
+    where
+        T: IntoIterator<Item = R>,
+        R: IntoIterator<Item = u8>,
+    {
         let mut p = OMEGA;
         for cycle in cycles {
-            for i in 0..cycle.len() {
-                p[cycle[i] as usize] = p[cycle[i + 1 % cycle.len()] as usize]
+            let mut iter = cycle.into_iter();
+            if let Some(fst) = iter.next() {
+                let mut i = fst;
+                while let Some(j) = iter.next() {
+                    p[i as usize] = j;
+                    i = j;
+                }
+                p[i as usize] = fst;
             }
         }
         Permutation::from_array(&p)
     }
 
-    fn from_array(arr: &[u8]) -> Permutation {
-        Permutation(u8x32::load_or(arr, u8x32::from_array(OMEGA)).into())
+    fn parse(s: &str) -> Option<Permutation> {
+        Some(Permutation::from_cycles(
+            s.strip_prefix("(")?
+                .strip_suffix(")")?
+                .split(")(")
+                .map(|x| {
+                    x.chars()
+                        .map(|c| u8::try_from(c.to_digit(32)?).ok())
+                        .try_collect::<Vec<u8>>()
+                })
+                .try_collect::<Vec<Vec<u8>>>()?,
+        ))
     }
-
 }
 
-impl std::ops::Mul for Permutation {
+impl ops::Mul for Permutation {
     type Output = Permutation;
 
     fn mul(self, rhs: Permutation) -> Permutation {
@@ -56,7 +82,7 @@ impl std::ops::Mul for Permutation {
     }
 }
 
-impl std::ops::Index<u8> for Permutation {
+impl ops::Index<u8> for Permutation {
     type Output = u8;
 
     fn index(&self, index: u8) -> &u8 {
@@ -90,39 +116,23 @@ const OMEGA: [u8; 32] = [
     26, 27, 28, 29, 30, 31,
 ];
 
-fn _semi_orbit(generators: &[Permutation]) -> [u8; 32] {
-    let mut partitions = OMEGA;
-    for generator in generators {
-        for i in 0..32 {
-            let j = generator[i];
-            let pi = partitions[i as usize];
-            let pj = partitions[j as usize];
-            if pi != pj {
-                for x in 0..32 {
-                    if x == pj {
-                        partitions[x as usize] = pi;
-                    }
-                }
-            }
-        }
-    }
-    partitions
-}
-
-fn orbit(generators: &[Permutation], point: u8) -> [Option<Permutation>; 32] {
+fn orbit<T>(generators: T, point: u8) -> [Option<Permutation>; 32]
+where
+    T: IntoIterator<Item = Permutation>,
+{
     let mut reps = [None; 32];
     reps[point as usize] = Some(Permutation::from_array(&OMEGA));
-    let mut queue = Vec::with_capacity(32);
-    queue.push(point);
-    for &generator in generators {
+    let mut orbit = Vec::with_capacity(32);
+    orbit.push(point);
+    for generator in generators {
         let mut i = 0;
-        while i < queue.len() {
-            if let Some(rep) = reps[i] {
-                let action = rep * generator;
-                let image = action[point];
-                if reps[image as usize].is_none() {
-                    reps[image as usize] = Some(action);
-                }
+        while i < orbit.len() {
+            let rep = reps[orbit[i] as usize].unwrap();
+            let image = generator[orbit[i]];
+            let action = rep * generator;
+            if reps[image as usize].is_none() {
+                reps[image as usize] = Some(action);
+                orbit.push(image);
             }
             i += 1;
         }
@@ -130,8 +140,17 @@ fn orbit(generators: &[Permutation], point: u8) -> [Option<Permutation>; 32] {
     reps
 }
 
+fn g<'a, T>(
+    generators: T,
+) -> iter::FilterMap<<T as IntoIterator>::IntoIter, for<'b> fn(&'b str) -> Option<Permutation>>
+where
+    T: IntoIterator<Item = &'a str>,
+{
+    generators.into_iter().filter_map(Permutation::parse)
+}
+
 fn main() {
-    let res = orbit(&[Permutation::from_array(&[1, 0, 3, 2])], 0);
+    let res = orbit(g(["(123)", "(12)", "(14)(25)(36)"]), 1);
     for (i, g) in res.into_iter().enumerate() {
         if let Some(g) = g {
             println!("{}: {}", i, g);
